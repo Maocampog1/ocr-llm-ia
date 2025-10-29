@@ -5,10 +5,20 @@ import os
 import requests
 import streamlit as st
 from dotenv import load_dotenv
-from PIL import Image
+from PIL import Image, ExifTags
+import io
+import base64
 import numpy as np
 import cv2
 import easyocr
+
+# Optional HEIC support: pillow-heif registers an opener so PIL can open .heic/.heif files
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except Exception:
+    # If pillow-heif isn't installed the app will still work for common formats
+    pass
 
 
 
@@ -96,10 +106,70 @@ def ocr_con_tu_metodo(archivo_imagen, min_conf: float) -> str:
     return "\n".join(lineas).strip()
 
 
+def process_uploaded_image(file, max_size=(1600, 1600), quality=70):
+    """Procesa la imagen antes de enviarla a OCR o a la API:
+    - Rota según EXIF
+    - Reduce resolución (thumbnail)
+    - Convierte formatos raros / HEIC a JPEG
+    - Comprime (quality)
+    - Devuelve un io.BytesIO (JPEG) y el base64 correspondiente
+    """
+    try:
+        # Abrir imagen con PIL (pillow-heif permite abrir .heic si está instalado)
+        image = Image.open(file)
+
+        # Rotación automática según EXIF
+        try:
+            for orientation in ExifTags.TAGS.keys():
+                if ExifTags.TAGS[orientation] == 'Orientation':
+                    break
+            exif = image._getexif() or {}
+            orientation_value = exif.get(orientation)
+            if orientation_value == 3:
+                image = image.rotate(180, expand=True)
+            elif orientation_value == 6:
+                image = image.rotate(270, expand=True)
+            elif orientation_value == 8:
+                image = image.rotate(90, expand=True)
+        except Exception:
+            # No EXIF or fallo en EXIF -> no rotación
+            pass
+
+        # Reducción de tamaño
+        image.thumbnail(max_size)
+
+        # Convertir a RGB si es un formato que JPEG no soporta directamente (p.ej. RGBA, P)
+        if image.mode in ("RGBA", "P"):
+            image = image.convert("RGB")
+
+        # Guardar en buffer como JPEG comprimido
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG", quality=quality)
+        img_bytes = buffer.getvalue()
+
+        # Mostrar preview en Streamlit (rápida)
+        try:
+            st.image(img_bytes, caption="Imagen procesada", use_column_width=True)
+        except Exception:
+            pass
+
+        # Base64 para APIs que lo requieran
+        img_b64 = base64.b64encode(img_bytes).decode()
+
+        # Devolver buffer con puntero al inicio y la cadena base64
+        buffer.seek(0)
+        return buffer, img_b64
+
+    except Exception as e:
+        st.error(f"Error procesando la imagen: {e}")
+        return None, None
+
+
 # Interfaz OCR boni
 
 st.subheader("Módulo 1: Lector de Imágenes (OCR)")
-archivo_imagen = st.file_uploader("Sube una imagen (PNG, JPG o JPEG)", type=["png", "jpg", "jpeg"])
+# Permitimos HEIC para iPhone; será convertido internamente a JPEG
+archivo_imagen = st.file_uploader("Sube una imagen (PNG, JPG, JPEG o HEIC)", type=["png", "jpg", "jpeg", "heic"])
 col_a, col_b = st.columns(2)
 with col_a:
     min_conf = st.slider("Confianza mínima del OCR", 0.0, 1.0, 0.5, 0.05)
@@ -108,14 +178,23 @@ with col_b:
 
 if archivo_imagen is not None:
     if st.button("Extraer texto (OCR)", use_container_width=True):
-        with st.spinner("Extrayendo texto..."):
+        with st.spinner("Procesando imagen y extrayendo texto..."):
             try:
-                texto = ocr_con_tu_metodo(archivo_imagen, min_conf)
-                st.session_state["ocr_text"] = texto
-                if texto:
-                    st.success("Texto detectado.")
+                # Procesar la imagen antes de enviarla al OCR (rotar, reducir, convertir a JPEG, comprimir)
+                processed_buffer, processed_b64 = process_uploaded_image(archivo_imagen)
+                if processed_buffer is None:
+                    st.error("No se pudo procesar la imagen subida.")
                 else:
-                    st.warning("No se detectó texto con suficiente confianza.")
+                    # Guardamos el JPEG procesado en sesión por si queremos enviarlo a una API (p.ej. GROQ)
+                    st.session_state["processed_image_b64"] = processed_b64
+
+                    # Pasamos el buffer al método OCR (funciona porque BytesIO tiene getvalue())
+                    texto = ocr_con_tu_metodo(processed_buffer, min_conf)
+                    st.session_state["ocr_text"] = texto
+                    if texto:
+                        st.success("Texto detectado.")
+                    else:
+                        st.warning("No se detectó texto con suficiente confianza.")
             except Exception as e:
                 st.error("No se pudo procesar la imagen.")
                 st.exception(e)
