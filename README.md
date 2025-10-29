@@ -4,7 +4,7 @@
 
 ###  Demo en línea
 
--> [Abrir la aplicación en Streamlit](https://ocr-llm-fda3pjkqvxe8gxlpuabwcq.streamlit.app/)
+-> [Abrir la aplicación en Streamlit](https://ocr-llm-ia.streamlit.app/)
 
 ---
 
